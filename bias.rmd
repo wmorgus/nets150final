@@ -1,0 +1,724 @@
+---
+title: "OIDD 245 Data Project 2: @mediabias u up? -Will Morgus"
+output: html_notebook
+---
+0.) Set-up:
+```{r}
+library(rtweet) #scraping tweets
+library(httpuv) #for use with rtweet
+library(stringr) #cleaning text initially
+library(tidyverse) #various dataframe operations
+library(tm) #used to create corpuses, dtm/tdms
+library(ggplot2) #used to display data
+library(reshape2) #very convenient methods to reshape data for better plotting
+library(data.table) #reading/writing to csv faster
+library(SnowballC) #stemming
+library(syuzhet) #sentiment
+library(ranger) #this worked better instead of randomForest
+library(wordcloud) #wordcloud for differing sentiments
+library(topicmodels) #for running LDA
+library(class) #for the k-nearest neighbors
+library(kernlab) #for the SVM
+library(keras) #neural nets
+
+#sum of ascii values for will morgus
+set.seed(1141)
+setwd('/Users/willmorgus/Desktop/penn/oidd245/bias')
+```
+
+1.) Set up Rtweet
+```{r}
+#set this up ahead of time: no API keys for you!
+get_token()
+```
+Now, testing rtweet:
+```{r}
+tmls <- get_timelines(c("cnn"), n = 50) %>% select(status_id, created_at, screen_name, text)
+tmls
+```
+Great, it worked. To build our data sets, we're going to collect 5000 tweets from each source, clean our data, add bias parameters, then split into training and testing sets.
+
+While there's a lot of [interesting reading](https://en.wikipedia.org/wiki/Media_bias#Scholarly_treatment_in_the_United_States_and_United_Kingdom) on media bias as a whole, I'm primarily going to be classifying media bias based on ratings from allsides.com, as their ratings are simple, concise, and rather widely accepted. I'm verifying these judgements with information from [Ad Fontes Media](https://www.adfontesmedia.com/how-ad-fontes-ranks-news-sources/), another rigorous bias rating site.
+
+Let's start building our data sets now:
+```{r}
+very_left = c("AlterNet", "democracynow", "MotherJones", "NewYorker", "MSNBC", "Slate", "Huffpost")
+leans_left = c("voxdotcom", "cnn", "buzzfeednews", "thedailybeast", "nytimes", "theatlantic", "washingtonpost", "politico")
+central = c("reuters", "ap", "npr", "bbcworld", "wsj", "thehill", "cbsnews", "business", "forbes", "businessinsider", "marketwatch", "theeconomist", "ft", "newsy", "csmonitor") #business is bloomberg
+leans_right = c("foxnewsalert", "reason", "WashTimes", "TheIJR", "DailyMail") #pretty hard to find these...
+very_right = c("BreitbartNews", "DailyCaller", "FDRLST", "NRO", "theblaze", "amconmag", "amspectator", "conserv_tribune", "pjmedia_com", "twitchyteam", "redstate")
+```
+(infowars got banned from twitter, or that would be a goldmine of content ¯\_(ツ)_/¯)
+
+Some quick pre-cleaning and prep:
+```{r}
+clean_text <- function(text) {
+  #set uniformly to lower
+  ret <- str_to_lower(text, locale="en")
+  #remove punctuation to not mess with CSV
+  ret <- str_remove_all(ret, "[:punct:]")
+  #had some issues with \n
+  ret <- str_replace_all(ret, "[:cntrl:]", " ")
+  #remove hyperlinks
+  ret <- str_remove_all(ret, "(http|https)[:alnum:]*(\\s|$)")
+  #remove RT or via
+  ret <- str_remove_all(ret, "(RT|via)[:alnum:]*(\\s|$)")
+  #standardize whitespace
+  ret <- str_replace_all(ret, "\\s+", " ")
+  return(ret)
+}
+
+get_sentiments <- function(input_text) {
+  sent <- get_sentiment(input_text, method="syuzhet")
+  return(sent)
+}
+
+stem_text <- function(text) {
+  new_tweets <- rep("", length(text))
+  split_tweets = str_split(text, " ")
+  ind = 0
+  for (tweet in split_tweets) {
+    ind = ind + 1
+    new_str <- ""
+    for (word in tweet) {
+      if (word != "") {
+        new_str = append(new_str, wordStem(word, language="english"))
+      }
+    }
+    new_tweet <- paste(new_str, collapse=" ")
+    #remove an extra space
+    new_tweets[ind] = substring(new_tweet, 2)
+  }
+  return(new_tweets)
+}
+```
+
+Time to actually retrieve them! This might take a while...
+```{r}
+v_l_df <- get_timelines(very_left, n = 5000, retryonratelimit = TRUE) %>% select(status_id, created_at, screen_name, text) %>% 
+  mutate(text=clean_text(text)) %>% mutate(sent=get_sentiment(text)) %>% mutate(text=stem_text(text)) %>% mutate(bias=0.0)
+l_l_df <- get_timelines(leans_left, n = 5000, retryonratelimit = TRUE) %>% select(status_id, created_at, screen_name, text) %>% 
+  mutate(text=clean_text(text)) %>% mutate(sent=get_sentiment(text)) %>% mutate(text=stem_text(text)) %>% mutate(bias=0.25)
+c_df <- get_timelines(central, n = 5000, retryonratelimit = TRUE) %>% select(status_id, created_at, screen_name, text) %>% 
+  mutate(text=clean_text(text)) %>% mutate(sent=get_sentiment(text)) %>% mutate(text=stem_text(text)) %>% mutate(bias=0.5)
+l_r_df <- get_timelines(leans_right, n = 5000, retryonratelimit = TRUE) %>% select(status_id, created_at, screen_name, text) %>% 
+  mutate(text=clean_text(text)) %>% mutate(sent=get_sentiment(text)) %>% mutate(text=stem_text(text)) %>% mutate(bias=0.75)
+v_r_df <- get_timelines(very_right, n = 5000, retryonratelimit = TRUE) %>% select(status_id, created_at, screen_name, text) %>% 
+  mutate(text=clean_text(text)) %>% mutate(sent=get_sentiment(text)) %>% mutate(text=stem_text(text)) %>% mutate(bias=1.0)
+```
+
+Finally, write to CSV so I don't have to scrape 150,000 tweets every time:
+```{r}
+#fwrite is much faster than write.csv
+fwrite(v_l_df, "./very_left.csv")
+fwrite(l_l_df, "./leans_left.csv")
+fwrite(c_df, "./central.csv")
+fwrite(l_r_df, "./leans_right.csv")
+fwrite(v_r_df, "./very_right.csv")
+```
+A read in for the next time I load:
+```{r}
+v_l_df <- fread("./very_left.csv")
+l_l_df <- fread("./leans_left.csv")
+c_df <- fread("./central.csv")
+l_r_df <- fread("./leans_right.csv")
+v_r_df <- fread("./very_right.csv")
+```
+Now, merge into a single dataframe and create the training/testing sets:
+```{r}
+#TODO: set up cross validation?
+all_tweets_df <- rbind(v_l_df, l_l_df, c_df, l_r_df, v_r_df)
+smp_size <- floor(0.75 * nrow(all_tweets_df))
+train_ind <- sample(seq_len(nrow(all_tweets_df)), size = smp_size)
+training_set <- all_tweets_df[train_ind, ]
+test_set <- all_tweets_df[-train_ind, ]
+```
+
+1.) TF-IDF analysis of tweet text/sentiment analysis, as it relates to bias
+First, let's put everything into a corpus. We'll write a function so we can do this easily for our train and our test data. We'll also do some basic cleaning: remove stopwords, remove numbers, standardize whitespace, remove hyperlinks, then convert to a DTM.
+
+Also, writing another function to display the most frequent words, and how many times they appear.
+```{r}
+df_to_corp <- function(input_df) {
+  corp.original = VCorpus(VectorSource(input_df$text))
+  corp = tm_map(corp.original, content_transformer(tolower), lazy=TRUE)
+  corp = tm_map(corp, removeWords, c(stopwords(kind = "en")))
+  corp = tm_map(corp, removeNumbers)
+  corp = tm_map(corp, stripWhitespace)
+  return(corp)
+}
+```
+Cool. Let's run it on our training data, then convert that to a tf-idf
+```{r}
+train_corp = df_to_corp(training_set)
+train_dtm = DocumentTermMatrix(train_corp)
+train_tfidf = TermDocumentMatrix(train_corp, control = list(weighting = weightTfIdf))
+train_tdm = TermDocumentMatrix(train_corp)
+```
+
+```{r}
+tdm_df <- tidy(train_tdm) %>% mutate(document = as.numeric(document)) %>% group_by(term) %>% summarize(count_freq=sum(count)) %>% arrange(desc(count_freq))
+all_words <- head(tdm_df, 3000)
+all_words
+ggplot(all_words, aes(x=seq_along(all_words$count_freq), y=all_words$count_freq)) + 
+  geom_line(colour="darkblue", size=1) + 
+  theme(axis.title.x=element_blank(), axis.text.x=element_blank()) +
+  ylab("Number of occurrences") +
+  ggtitle("Frequency of all words")
+
+top_words <- head(all_words, 75)
+ggplot(top_words, aes(reorder(term, -count_freq), count_freq)) + 
+        geom_bar(stat="identity", fill="darkred", colour="darkblue") + xlab("term") +
+        theme(axis.text.x=element_text(angle=90, hjust=1)) + ggtitle("Frequency of words, top 75")
+```
+We see a pretty heavy dropoff of frequency, so we can make the assumption that we should limit our vocabulary.
+
+Let's look at how TF-IDF values compare to just frequency. We'll first gather the top tf-idf words:
+```{r}
+tfidf_df <- tidy(train_tfidf) %>% group_by(term) %>% summarize(tfidf_freq=sum(count)) %>% arrange(desc(tfidf_freq))
+tf_all <- head(tfidf_df, 3000)
+tf_all
+ggplot(tf_all, aes(x=seq_along(tf_all$tfidf_freq), y=tf_all$tfidf_freq)) + 
+  geom_line(colour="darkblue", size=1) + 
+  theme(axis.title.x=element_blank(), axis.text.x=element_blank()) +
+  ylab("TF-IDF score") +
+  ggtitle("TF-IDF score of all words")
+
+top_tfidf = head(tf_all, 75)
+ggplot(top_tfidf, aes(reorder(term, -tfidf_freq), tfidf_freq)) + 
+      geom_bar(stat="identity", fill="darkred", colour="darkblue") + xlab("term") +
+      theme(axis.text.x=element_text(angle=90, hjust=1)) + ggtitle("Frequency of words, top 75")
+```
+Looks pretty similar. Let's do a side by side comparison (and account for scaling)
+```{r}
+freq_comp <- full_join(all_words, tf_all, by="term") %>% mutate_all(~replace(., is.na(.), 0))
+colnames(freq_comp) = c("word", "count_freq", "tfidf_freq")
+freq_comp
+freq_comp <- mutate(freq_comp, log_count_freq=log(count_freq+1))
+freq_comp
+#convert word value to a number make plotting easier
+for (i in seq(1:nrow(freq_comp))) {
+  freq_comp[i,1] = as.character(i)
+}
+freq_comp
+#reshape to make plotting easier
+freq_melted <- melt(freq_comp, id.var='word')
+freq_melted$word <- as.numeric(freq_melted$word) #allow to plot on axis
+ggplot(freq_melted, aes(x=word, y=value, col=variable)) + 
+  geom_line() + 
+  theme(axis.title.x=element_blank(), axis.text.x=element_blank())
+```
+The TF-IDF model definitely seems to think that some words that appear less frequently overall but in more documents might matter more. That being, let's use the top TF-IDF words that as our model vocabulary, and choose 1000 words to define our vocabulary
+```{r}
+vocab = head(tf_all, 1000)$term
+vocab
+```
+Now that we've chosen the words we want to focus most on, let's see how differently biased sources use them.
+
+To do this, let's look at frequency comparisons and how average tweet sentiment for each word changes with bias
+
+We'll now encode our tweets depending on our vocabulary
+```{r}
+encode_tweets = function(input_df, input_vocab){
+  vocab_len = length(input_vocab)
+  vocab_count <- data.frame(matrix(ncol = (2 + vocab_len), nrow = nrow(input_df)))
+  vocab_count <- mutate_all(vocab_count, ~replace(., is.na(.), 0))
+  freq_sent_cols <- c("bias", "sent", paste(input_vocab))
+  colnames(vocab_count) <- freq_sent_cols
+  
+  for (row in seq(1:nrow(input_df))) {
+    vocab_count[row, 1] = as.double(input_df[row, "bias"])
+    vocab_count[row, 2] = as.double(input_df[row, "sent"])
+    split_text = str_split(input_df[row, "text"], " ")
+    for (tweet in split_text) {
+      for (word in tweet) {
+        if (word %in% input_vocab) {
+          vocab_count[row, match(word, input_vocab) + 2] = 1
+        }
+      }
+    }
+  }
+  return(vocab_count)
+}
+```
+
+```{r}
+training_encoded = encode_tweets(training_set, vocab)
+test_encoded = encode_tweets(test_set, vocab)
+
+#the model isn't able to read in the arguments as vocab words for some reason, so we'll re-encode column names
+new_col_names <- c(unlist(str_split(paste(c("",  c(1:length(colnames(training_encoded)))), collapse=" var_"), " ")))
+new_col_names <- new_col_names[-1]
+colnames(training_encoded) <- new_col_names
+colnames(test_encoded) <- new_col_names
+```
+
+Wow, so those are also large. I'm gonna save them so I don't have to rerun that.
+```{r}
+fwrite(data.frame(vocab), "./vocab.txt")
+fwrite(training_encoded, "./training_encoded.csv")
+fwrite(test_encoded, "./test_encoded.csv")
+```
+And a re-read:
+```{r}
+vocab = fread("./vocab.txt")$vocab
+training_encoded = fread("./training_encoded.csv")
+test_encoded = fread("./test_encoded.csv")
+```
+
+
+First, let's try setting some some hyperparameters and seeing how our model does:
+```{r}
+#helper functions
+get_df_sample = function(input_df, num_samples) {
+  return(input_df[sample(nrow(input_df), num_samples), ])
+}
+
+accuracy = function(x){sum(diag(x)/(sum(rowSums(x)))) * 100}
+
+score_diff_accuracy = function(test_df, preds) {
+  bias_accuracy_df = data.frame(matrix(ncol = (2), nrow = 5))
+  bias_accuracy_df <- mutate_all(bias_accuracy_df, ~replace(., is.na(.), 0))
+  colnames(bias_accuracy_df) <- c("total_bias_differential", "tweets_in_bias_category")
+  for (row_ind in seq(1:nrow(test_df))) {
+    #convert to integer then compare to 1.) make this a classification problem, 2.) make filling in accuracy_df easier
+    est = round(as.double(preds[row_ind]) * 4) + 1
+    actual = (as.double(test_df[row_ind, "var_1"]) * 4) + 1
+    bias_diff = ((as.double(actual - est) - 1) / 4)
+    if (!is.na(bias_diff)) {
+      bias_accuracy_df[actual, 1] = bias_accuracy_df[actual, 1] + bias_diff
+      bias_accuracy_df[actual, 2] = bias_accuracy_df[actual, 2] + 1
+    }
+  }
+  bias_accuracy_df = bias_accuracy_df %>% mutate(average=(total_bias_differential/tweets_in_bias_category))
+  return(bias_accuracy_df$average)
+}
+```
+
+```{r}
+#test on a smaller sample: i don't want to run on 100,000 tweets every time
+parameter_tune_training = get_df_sample(training_encoded, 36000) #36000, 12000 for full scale
+parameter_tune_test = get_df_sample(test_encoded, 12000)
+
+num_trees = seq(from=20, to=500, by=80)
+train_acc_trees = rep(0, 6)
+test_acc_trees = rep(0, 6)
+diff_trees_df = data.frame(matrix(ncol = 10, nrow = 6))
+
+ctr = 0
+for (trees in num_trees) {
+  ctr = ctr + 1
+  rf = ranger(var_1 ~ ., data=parameter_tune_training, num.trees = trees)
+  
+  preds_train = predict(rf, parameter_tune_training)$predictions
+  train_acc_trees[ctr] = accuracy(table((round(preds_train * 4) + 1), 
+                                        ((parameter_tune_training$var_1) * 4) + 1))
+  diff_trees_df[ctr,c(1:5)] = score_diff_accuracy(parameter_tune_training, preds_train)
+  
+  preds_test = predict(rf, parameter_tune_test)$predictions
+  test_acc_trees[ctr] = accuracy(table((round(preds_test * 4) + 1), 
+                                       ((parameter_tune_test$var_1) * 4) + 1))
+  diff_trees_df[ctr,c(6:10)] = score_diff_accuracy(parameter_tune_test, preds_test)
+}
+
+param_trees_df = data.frame(cbind(num_trees, train_acc_trees, test_acc_trees))
+
+colnames(param_trees_df) <- c("num_trees", "train_accuracy", "test_accuracy")
+trees_melted <- reshape2::melt(param_trees_df, id.var=c("num_trees"))
+trees_melted$num_trees <- as.numeric(trees_melted$num_trees)
+ggplot(trees_melted, aes(x=num_trees, y=value, col=variable)) + 
+  geom_line() + xlab("number of trees") + ylab("accuracy")
+
+diff_trees_df = cbind(num_trees, diff_trees_df)
+colnames(diff_trees_df) = c("num_trees", "v_l_train", "l_l_train", "c_train", "l_r_train", "v_r_train", "v_l_test", "l_l_test", "c_test", "l_r_test", "v_r_test")
+trees_melted <- reshape2::melt(diff_trees_df, id.var="num_trees")
+trees_melted$num_trees <- as.numeric(trees_melted$num_trees)
+trees_melted
+ggplot(trees_melted, aes(x=num_trees, y=value, col=variable)) + 
+  geom_line() + xlab("maximum tree depth") + ylab("accuracy differential") + 
+  scale_color_manual(values=c("#bf6d6b", "#c271b2", "#727bc4", "#82c79c", "#cfc984", "#e65353", "#e658d1", "#5776e6", "#68e68c", "#e6d766"))
+```
+
+```{r}
+max_depth = seq(from=50, to=110, by=10)
+train_acc_depth = rep(0, 6)
+test_acc_depth = rep(0, 6)
+diff_depth_df = data.frame(matrix(ncol = 10, nrow = 6))
+
+ctr = 0
+for (depth in max_depth) {
+  ctr = ctr + 1
+  rf = ranger(var_1 ~ ., data=parameter_tune_training, max.depth = depth)
+  
+  preds_train = predict(rf, parameter_tune_training)$predictions
+  train_acc_depth[ctr] = accuracy(table((round(preds_train * 4) + 1), 
+                                        ((parameter_tune_training$var_1) * 4) + 1))
+  diff_depth_df[ctr,c(1:5)] = score_diff_accuracy(parameter_tune_training, preds_train)
+  
+  preds_test = predict(rf, parameter_tune_test)$predictions
+  test_acc_depth[ctr] = accuracy(table((round(predict(rf, parameter_tune_test)$predictions * 4) + 1), 
+                                       ((parameter_tune_test$var_1) * 4) + 1))
+  diff_depth_df[ctr,c(6:10)] = score_diff_accuracy(parameter_tune_test, preds_test)
+}
+
+param_depth_df = data.frame(cbind(max_depth, train_acc_depth, test_acc_depth))
+colnames(param_depth_df) <- c("max_depth", "train_accuracy", "test_accuracy")
+param_depth_df
+depth_melted <- reshape2::melt(param_depth_df, id.var="max_depth")
+depth_melted$max_depth <- as.numeric(depth_melted$max_depth)
+depth_melted
+ggplot(depth_melted, aes(x=max_depth, y=value, col=variable)) + 
+  geom_line() + xlab("maximum tree depth") + ylab("accuracy")
+
+diff_depth_df = cbind(max_depth, diff_depth_df)
+colnames(diff_depth_df) = c("max_depth", "v_l_train", "l_l_train", "c_train", "l_r_train", "v_r_train", "v_l_test", "l_l_test", "c_test", "l_r_test", "v_r_test")
+depth_melted <- reshape2::melt(diff_depth_df, id.var="max_depth")
+depth_melted$max_depth <- as.numeric(depth_melted$max_depth)
+depth_melted
+ggplot(depth_melted, aes(x=max_depth, y=value, col=variable)) + 
+  geom_line() + xlab("maximum tree depth") + ylab("accuracy differential") + 
+    scale_color_manual(values=c("#bf6d6b", "#c271b2", "#727bc4", "#82c79c", "#cfc984", "#e65353", "#e658d1", "#5776e6", "#68e68c", "#e6d766"))
+```
+
+Even with high numbers of trees and depths, we're seeing poor predictive power on the part of our model. We can either 1.) add more data (I think we have enough), 2.) adjust hyperparameters (tried that), or 3.) feature engineer. We'll try limiting the vocabulary of our classifier so that it only learns to associate the most "important" words. We'll also try defining "important" a few different ways.
+
+First, let's find the 250 words that the left-biased sources and right-biased sources use most differently, as measured by sentiment. This metric will also ideally filter out news-type words like 'reporting' or 'live' that would have no real indication of bias but were included because of a high frequency. 
+
+```{r}
+
+get_sent_col_diff = function(input_col) {
+  input_col[6] = abs(input_col[1] - input_col[3]) + .75 * abs(input_col[1] - input_col[3])
+  input_col[7] = abs(input_col[5] - input_col[3]) + .75 * abs(input_col[5] - input_col[2])
+  return(input_col)
+}
+
+get_sent_stats = function(input_df, input_vocab){
+  vocab_len = length(input_vocab)
+  vocab_count <- data.frame(matrix(ncol = (1 + 2 * vocab_len), nrow = 7))
+  vocab_count <- mutate_all(vocab_count, ~replace(., is.na(.), 0))
+  freq_sent_cols <- c("bias", paste(input_vocab), unlist(str_split(paste(c(paste(input_vocab), ""), collapse="_sent "), " ")))
+  freq_sent_cols <- freq_sent_cols[-length(freq_sent_cols)]
+  colnames(vocab_count) <- freq_sent_cols
+  
+  for (row in seq(1:nrow(input_df))) {
+    bias  <- as.double(input_df[row, "bias"])
+    sent <- as.double(input_df[row, "sent"])
+    split_text = str_split(input_df[row, "text"], " ")
+    for (tweet in split_text) {
+      for (word in tweet) {
+        if (word %in% input_vocab) {
+          match_val =  match(word, input_vocab) + 1
+          bias_val = (bias * 4) + 1
+          vocab_count[bias_val, match_val] = vocab_count[bias_val, match_val] + 1
+          vocab_count[bias_val, match_val + vocab_len] = vocab_count[bias_val, match_val + vocab_len] + sent
+        }
+      }
+    }
+  }
+
+  vocab_count$bias <- c(0, 0.25, 0.5, 0.75, 1, 2, 3)
+  #average out sentiments
+  for(i in 2:(ncol(vocab_count)/2)){
+    vocab_count[,i + vocab_len] = (vocab_count[,i + vocab_len] / vocab_count[,i])
+    vocab_count[,i + vocab_len] = get_sent_col_diff(vocab_count[,i + vocab_len])
+  }
+  vocab_count[is.na(vocab_count)] <- 0
+  
+  return(vocab_count)
+}
+```
+
+
+Let's build a vocabulary with the top 250 of each, and rerun our model.
+```{r}
+training_sent_stats = get_sent_stats(training_set, vocab)
+training_sent_stats = data.frame(t(training_sent_stats))
+
+colnames(training_sent_stats) <- c("v_l", "l_l", "c", "l_r", "v_r", "l_diff", "r_diff")
+training_sent_stats = training_sent_stats[-1,]
+```
+
+
+```{r}
+top_left_sent_diff = training_sent_stats %>% rownames_to_column('word') %>% top_n(250, l_diff) %>% arrange(desc(l_diff)) %>% mutate(word=substr(word,1,nchar(word)-5)) %>% mutate(diff = r_diff)
+top_right_sent_diff = training_sent_stats %>% rownames_to_column('word') %>% top_n(250, r_diff) %>% arrange(desc(r_diff)) %>% mutate(word=substr(word,1,nchar(word)-5)) %>% mutate(diff = r_diff)
+
+
+sent_diff_vocab = c(top_left_sent_diff$word, top_right_sent_diff$word)
+sent_diff_vocab
+
+cloud_df = cbind(head(top_left_sent_diff, 30))
+wordcloud(head(top_left_sent_diff, 30)$word, head(top_left_sent_diff, 30)$l_diff, colors=c("darkblue"), scale=c(2, .5), random.order = FALSE)
+wordcloud(head(top_right_sent_diff, 30)$word, head(top_right_sent_diff, 30)$r_diff, colors=c("darkred"), scale=c(2, .5), random.order = FALSE)
+```
+
+
+```{r}
+sent_training_encoded = encode_tweets(training_set, sent_diff_vocab)
+sent_test_encoded = encode_tweets(test_set, sent_diff_vocab)
+
+new_col_names <- c(unlist(str_split(paste(c("",  c(1:length(colnames(sent_training_encoded)))), collapse=" var_"), " ")))
+new_col_names <- new_col_names[-1]
+colnames(sent_training_encoded) <- new_col_names
+colnames(sent_test_encoded) <- new_col_names
+
+fwrite(sent_training_encoded, "./sent_training_encoded.csv")
+fwrite(sent_test_encoded, "./sent_test_encoded.csv")
+```
+And a re-read:
+```{r}
+sent_training_encoded = fread("./sent_training_encoded.csv")
+sent_test_encoded = fread("./sent_test_encoded.csv")
+```
+
+```{r}
+rf = ranger(var_1 ~ ., data=sent_training_encoded, num.trees = 100, max.depth = 100)
+```
+
+
+```{r}
+preds_test = predict(rf, sent_test_encoded)$predictions
+accuracy(table((round(preds_test * 4) + 1), ((sent_test_encoded$var_1) * 4) + 1))
+score_diff_accuracy(sent_test_encoded, preds_test)
+```
+
+Hm. Not a lot better. This isn't particularly surprising, considering a RF with 1000 trees could build as good of a model for 200 vocab words as it could 1000. Let's try rebuilding our vocabulary using PCA.
+
+```{r}
+prc = prcomp(training_encoded[,-1], center = TRUE, scale= TRUE)
+```
+
+
+```{r}
+std_dev <- prc$sdev
+pr_var <- std_dev^2
+prop_varex <- pr_var/sum(pr_var)
+
+plot(prop_varex, xlab = "Principal Component",
+             ylab = "Proportion of Variance Explained",
+             type = "b")
+
+plot(cumsum(prop_varex), xlab = "Principal Component",
+              ylab = "Cumulative Proportion of Variance Explained",
+              type = "b")
+
+prop_first_500 <- pr_var[1:500]/sum(pr_var)
+plot(prop_first_500, xlab = "Principal Component",
+             ylab = "Proportion of Variance Explained",
+             type = "b")
+
+plot(cumsum(prop_first_500), xlab = "Principal Component",
+              ylab = "Cumulative Proportion of Variance Explained",
+              type = "b")
+```
+With 500 principal components, it looks like we can explain about 60% of our variance. Not great, but it'll definitely help some!
+
+```{r}
+pca_train <- data.frame(var_1 = training_encoded$var_1, prc$x)[,1:501]
+pca_test <- data.frame(var_1 = test_encoded$var_1, predict(prc, newdata = test_encoded[,-1]))[,1:501]
+```
+
+
+```{r}
+rf = ranger(var_1 ~ ., data=pca_train, num.trees = 100, max.depth = 100)
+```
+
+
+```{r}
+pca_preds = predict(rf, pca_test)$predictions
+
+accuracy(table((round(pca_preds * 4) + 1), ((pca_test$var_1) * 4) + 1))
+score_diff_accuracy(pca_test, pca_preds)
+```
+Our accuracy improved, not a lot, but still some!
+
+```{r}
+fwrite(pca_train, "pca_train.csv")
+fwrite(pca_test, "pca_test.csv")
+```
+
+```{r}
+pca_train = fread("pca_train.csv")
+pca_test = fread("pca_test.csv")
+```
+
+
+K-nearest neighbors
+```{r}
+train_knn = pca_train
+test_knn = pca_test
+train_knn = get_df_sample(train_knn, 52000)
+test_knn = get_df_sample(test_knn, 13000)
+```
+
+
+```{r}
+knn_predictions <- knn(train_knn, test_knn, train_knn$var_1, k=3)
+
+knn_table <- table(knn_predictions, test_knn$var_1)
+accuracy(knn_table)
+```
+
+Pretty good! Let's try with a support vector machine:
+```{r}
+#svm wants integer labels:
+train_svm = pca_train %>% mutate(var_1=((var_1*4) + 1))
+test_svm = pca_test %>% mutate(var_1=((var_1*4) + 1))
+
+test_actual = test_svm$var_1
+
+unscaled_labels = train_svm$var_1
+scale_train = data.frame(scale(as.matrix(train_svm))) %>% mutate_all(~replace(., is.na(.), 0))
+scale_test = data.frame(scale(as.matrix(test_svm))) %>% mutate_all(~replace(., is.na(.), 0))
+scale_train$var_1 = as.integer(unscaled_labels)
+
+svm_model <- ksvm(var_1~., data=scale_train, type="C-svc", kernel="linear", prob.model=TRUE)
+
+svm_pred_df = data.frame(predict(svm_model, scale_test[,-1], type="probabilities"))
+
+for (i in seq(1:nrow(svm_pred_df))) {
+  curr_row = c(svm_pred_df[i,1], svm_pred_df[i,2], svm_pred_df[i,3], svm_pred_df[i,4], svm_pred_df[i,5])
+  svm_pred_df[i,6] = which.max(curr_row)
+}
+
+svm_table <- table(svm_pred_df$V6, test_actual)
+accuracy(svm_table)
+```
+
+Maybe not.
+
+Neural nets, anyone?
+```{r}
+train_x_keras = train_svm[,-1]
+train_y_keras = as.integer(train_svm[,1] - 1)
+test_x_keras = test_svm[,-1]
+test_y_keras = as.integer(test_svm[,1] - 1)
+```
+
+
+```{r}
+keras_eval_model = function(keras_model, train_x, train_y, test_x, test_y) { 
+  history <- keras_model %>% fit(
+    train_x, train_y, 
+    epochs = 30, batch_size = 100, 
+    validation_split = 0.2
+  )
+  plot(history)
+  
+  return(keras_model %>% evaluate(test_x, test_y, verbose = 0))
+}
+```
+
+
+```{r}
+keras_model_vanilla <- keras_model_sequential() 
+keras_model_vanilla %>% 
+  layer_dense(units = 1024, activation = "sigmoid", input_shape = c(500)) %>% 
+  layer_dense(units = 512, activation = "sigmoid") %>%
+  layer_dense(units = 256, activation = "relu") %>%
+  layer_dense(units = 5, activation = "softmax")
+
+keras_model_vanilla %>% compile(
+  loss = "sparse_categorical_crossentropy",
+  optimizer = optimizer_sgd(lr = 0.01, nesterov=TRUE),
+  metrics = c("accuracy")
+)
+
+keras_eval_model(keras_model_vanilla, as.matrix(train_x_keras), as.matrix(train_y_keras), as.matrix(test_x_keras), as.matrix(test_y_keras))
+```
+
+Wow, way better! 100% accuracy on the training data within a few epochs might suggest overfitting, so let's try some alternatives:
+
+```{r}
+keras_model_dropout <- keras_model_sequential()
+
+keras_model_dropout %>% 
+  layer_dense(units = 512, activation = "relu", input_shape = c(500), kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+  layer_dropout(rate = 0.4) %>% 
+  layer_dense(units = 256, activation = "relu", kernel_regularizer = regularizer_l2(l = 0.001)) %>%
+  layer_dropout(rate = 0.4) %>% 
+  layer_dense(units = 128, activation = "sigmoid") %>%
+  layer_dropout(rate = 0.3) %>%
+  layer_dense(units = 5, activation = "softmax")
+
+keras_model_dropout %>% compile(
+  loss = "sparse_categorical_crossentropy",
+  optimizer = optimizer_sgd(lr = 0.01, nesterov=TRUE),
+  metrics = c("accuracy")
+)
+keras_eval_model(keras_model_dropout, as.matrix(train_x_keras), as.matrix(train_y_keras), as.matrix(test_x_keras), as.matrix(test_y_keras))
+```
+
+
+Inference: we've done a lot of modeling on our training and test data, how do our models do on data they haven't seen. Let's pull in some external data and see what our model makes of it.
+```{r}
+inference = function(twitter_handle) {
+  inf_df <- get_timelines(twitter_handle, n = 7`500, retryonratelimit = TRUE) %>% select(status_id, created_at, screen_name, text) %>% mutate(text=clean_text(text)) %>% mutate(sent=get_sentiment(text)) %>% mutate(text=stem_text(text)) %>% mutate(bias=-1)
+  inf_encoded = encode_tweets(inf_df, vocab)
+  colnames(inf_encoded) = new_col_names
+
+  pca_inf = predict(prc, newdata = inf_encoded[,-1])[,1:500]
+  
+  inf_preds <- keras_model_dropout %>% predict(pca_inf)
+  inf_preds = data.frame(inf_preds)
+  inf_preds$max_pred = 0
+  for (i in seq(1:nrow(inf_preds))) {
+    inf_preds[i,ncol(inf_preds)] = which.max(inf_preds[i,])
+  }
+  
+  return(c(twitter_handle, mean(inf_preds$max_pred), median(inf_preds$max_pred), sd(inf_preds$max_pred)))
+}
+```
+
+
+```{r}
+new_tweet_sources <- c("tuckercarlson", "ac360", "tomilahren", "berniesanders", "seanhannity", "aoc", "sonnytambe", "hadleywickham", "shakira")
+all_inference = data.frame(matrix(ncol = 4, nrow = length(new_tweet_sources)))
+colnames(all_inference) <- c("account", "mean bias", "median bias", "std dev")
+ctr = 0
+for (acct in new_tweet_sources) {
+  ctr = ctr + 1
+  all_inference[ctr,] = inference(acct)
+}
+all_inference
+```
+
+
+CNNs -- media bias redux
+```{r}
+v_l_df <- fread("./very_left.csv")
+l_l_df <- fread("./leans_left.csv")
+c_df <- fread("./central.csv")
+l_r_df <- fread("./leans_right.csv")
+v_r_df <- fread("./very_right.csv")
+all_tweets_df <- rbind(v_l_df, l_l_df, c_df, l_r_df, v_r_df)
+
+
+tokenizer <- text_tokenizer(num_words = 20000)
+tokenizer <- fit_text_tokenizer(all_tweets_df$text)
+
+library(devtools)
+install_github("mukul13/rword2vec")
+
+smp_size <- floor(0.8 * nrow(all_tweets_df))
+train_ind <- sample(seq_len(nrow(all_tweets_df)), size = smp_size)
+training_set <- all_tweets_df[train_ind, ]
+test_set <- all_tweets_df[-train_ind, ]
+
+
+keras_model_vanilla <- keras_model_sequential() 
+keras_model_vanilla %>% 
+  layer_dense(units = 1024, activation = "sigmoid", input_shape = c(500)) %>% 
+  layer_dense(units = 512, activation = "sigmoid") %>%
+  layer_dense(units = 256, activation = "relu") %>%
+  layer_dense(units = 5, activation = "softmax")
+
+keras_model_vanilla %>% compile(
+  loss = "sparse_categorical_crossentropy",
+  optimizer = optimizer_sgd(lr = 0.01, nesterov=TRUE),
+  metrics = c("accuracy")
+)
+
+keras_eval_model(keras_model_vanilla, as.matrix(train_x_keras), as.matrix(train_y_keras), as.matrix(test_x_keras), as.matrix(test_y_keras))
+```
+
