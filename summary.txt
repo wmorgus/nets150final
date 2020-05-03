@@ -1,0 +1,13 @@
+Determining Sentiments in Tweets from News Organizations
+
+An emperical analysis project by Siyuan Liu, Luigi Mangione, and William Morgus
+
+For our project, we scraped tweets from 46 different news sources to try and see how news sources of various leanings were tweeting about the same entities differently. We scraped 5000 tweets per news source and performed cleaning and sentiment analysis in R, and we filtered for relevant tweets and created statistics for our corpus in Python.
+Our hypothesis is, for the words “Trump”, “Republican,” “Democrat,” and “American,” news organizations that were considered having more political bias (very left/right) would have more extreme sentiments than that of center leaning media outlets. Our hypothesis ended up being disproved as we saw the biggest range of emotions and sentiment among central bias news companies. 
+
+Our main focus was document search as we were scraping data off Twitter, assigning tweets sentiment scores, and identifying and filtering to only the tweets we thought were relevant to our project.
+Social networks were also a point of focus as we were interested in how news, both real and fake, on social media has possibly polarized the American public. It has become one of the primary ways we receive information nowadays, and Twitter has become one of the main social media used for dissemination of information and ideas.
+
+Will performed the data scraping, cleaning, and sentiment analysis.
+Luigi filtered our corpus of tweets and created graphs and statistics for each political leaning.
+Siyuan analyzed the data, drew conclusions, and wrote the report.
